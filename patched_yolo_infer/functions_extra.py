@@ -800,3 +800,135 @@ def auto_calculate_crop_values(image, mode="network_based", model=None, classes_
             crop_overlap_x = 0
 
     return crop_shape_x, crop_shape_y, crop_overlap_x, crop_overlap_y
+
+def new_auto_calculate_crop_values(
+    image, 
+    mode="network_based",
+    model=None,
+    classes_list=None,
+    conf=0.25,
+    min_patch_size=320,
+    max_patch_size=1280,
+    max_patches_per_dim=7,
+    adaptive_overlap=True
+):
+    """
+    Enhanced function to automatically calculate optimal crop size and overlap for an image.
+
+    Parameters:
+    image (numpy.ndarray): The input BGR image
+    mode (str): Analysis mode - "resolution_based", "network_based", or "hybrid". Default: "network_based"
+    model (YOLO): YOLO model for object detection. If None, loads default. Default: None
+    classes_list (list): Class indices to consider. If None, considers all. Default: None
+    conf (float): Detection confidence threshold. Default: 0.25
+    min_patch_size (int): Minimum allowed patch dimension. Default: 320
+    max_patch_size (int): Maximum allowed patch dimension. Default: 1280  
+    max_patches_per_dim (int): Maximum patches per dimension. Default: 7
+    adaptive_overlap (bool): Use adaptive overlap calculation. Default: True
+
+    Returns:
+    tuple: (crop_shape_x, crop_shape_y, crop_overlap_x, crop_overlap_y)
+    """
+    if not isinstance(image, np.ndarray):
+        raise ValueError("Input image must be a numpy array")
+
+    height, width = image.shape[:2]
+    min_dim = min(height, width)
+
+    # Basic validation
+    if min_dim < min_patch_size:
+        return width, height, 0, 0  # Return full image if too small
+        
+    if mode == "resolution_based":
+        return basic_crop_size_calculation(width, height)
+        
+    elif mode == "network_based" or mode == "hybrid":
+        # Initialize model if needed
+        if model is None:
+            try:
+                model = YOLO("yolo11m.pt")
+            except Exception as e:
+                print(f"Failed to load model: {e}")
+                return basic_crop_size_calculation(width, height)
+
+        # Perform detection
+        try:
+            result = model.predict(image, conf=conf, iou=0.75, classes=classes_list, verbose=False)
+        except Exception as e:
+            print(f"Detection failed: {e}")
+            return basic_crop_size_calculation(width, height)
+
+        if len(result[0].boxes) == 0:
+            return basic_crop_size_calculation(width, height)
+
+        # Calculate statistics of detected objects
+        widths = []
+        heights = []
+        areas = []
+        
+        for box in result[0].boxes:
+            _, _, w, h = box.xywh[0].tolist()
+            widths.append(w)
+            heights.append(h)
+            areas.append(w * h)
+
+        max_obj_width = max(widths)
+        max_obj_height = max(heights)
+        avg_obj_width = sum(widths) / len(widths)
+        avg_obj_height = sum(heights) / len(heights)
+        obj_density = len(areas) / (width * height)
+
+        # Calculate base patch sizes considering both max and average object sizes
+        if width > height:
+            crop_shape_x = int(max(min_patch_size, min(max_patch_size, 
+                max_obj_width * 2.5 + avg_obj_width)))
+            crop_shape_y = int(max(min_patch_size, min(max_patch_size, 
+                max_obj_height * 2 + avg_obj_height)))
+        else:
+            crop_shape_x = int(max(min_patch_size, min(max_patch_size, 
+                max_obj_width * 2 + avg_obj_width)))
+            crop_shape_y = int(max(min_patch_size, min(max_patch_size, 
+                max_obj_height * 2.5 + avg_obj_height)))
+
+        # Adjust patch sizes based on object density
+        if obj_density > 0.1:  # High density
+            crop_shape_x = min(crop_shape_x * 1.2, max_patch_size)
+            crop_shape_y = min(crop_shape_y * 1.2, max_patch_size)
+        
+        # Calculate adaptive overlap
+        if adaptive_overlap:
+            base_overlap = 0.2  # 20% minimum overlap
+            density_factor = min(0.5, obj_density * 2)  # Max 50% additional overlap
+            
+            crop_overlap_x = int((base_overlap + density_factor) * 100)
+            crop_overlap_y = int((base_overlap + density_factor) * 100)
+            
+            # Adjust overlap based on max object size relative to patch size
+            crop_overlap_x = max(crop_overlap_x, int(max_obj_width/crop_shape_x * 100))
+            crop_overlap_y = max(crop_overlap_y, int(max_obj_height/crop_shape_y * 100))
+        else:
+            crop_overlap_x = int(max_obj_width/crop_shape_x * 1.2 * 100)
+            crop_overlap_y = int(max_obj_height/crop_shape_y * 1.2 * 100)
+
+        # Enforce overlap limits
+        crop_overlap_x = min(70, max(20, crop_overlap_x))
+        crop_overlap_y = min(70, max(20, crop_overlap_y))
+
+        # Adjust for max patches constraint
+        while (height // crop_shape_y) > max_patches_per_dim:
+            crop_shape_y = height // max_patches_per_dim
+        while (width // crop_shape_x) > max_patches_per_dim:
+            crop_shape_x = width // max_patches_per_dim
+
+        # Final adjustments for small images
+        if height / crop_shape_y < 1.25:
+            crop_shape_y = height
+            crop_overlap_y = 0
+        if width / crop_shape_x < 1.25:
+            crop_shape_x = width
+            crop_overlap_x = 0
+
+        return crop_shape_x, crop_shape_y, crop_overlap_x, crop_overlap_y
+    
+    else:
+        raise ValueError(f"Unsupported mode: {mode}")
